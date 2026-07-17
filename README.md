@@ -1,40 +1,86 @@
 # portfolio-optimization-rl
 
-Reinforcement learning setup for long-only portfolio allocation with a custom gym environment that is aware of market regimes, transaction costs, and risk-sensitive rewards. Training uses PPO from Stable-Baselines3 on daily price data from Yahoo Finance.
+A regime-aware **PPO** agent for long-only portfolio allocation, built on a custom Gym environment with turnover-based transaction costs — and, importantly, evaluated **out-of-sample against real baselines** rather than in-sample.
 
-## Highlights
-- Custom `PortfolioEnv` with softmax-constrained weights, turnover-based transaction costs, and ruin cutoff.
-- Regime detection via rolling volatility (Low, High, Crash) fed into observations for regime-aware policies.
-- PPO training with Stable-Baselines3 2.1.0 on a classic gym (<=0.25) API via `DummyVecEnv`.
-- Evaluation notebook cells for portfolio value curves, regime paths, and Sharpe ratios overall and per regime.
+[![tests](https://img.shields.io/badge/tests-11%20passing-brightgreen.svg)](tests/test_portfolio_rl.py)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-## Project Layout
-- [RL.ipynb](RL.ipynb): end-to-end notebook with environment, training, evaluation, and plots.
+## The idea, and the honest evaluation
 
-## Setup
-1) Create and activate a virtual environment (example on Windows PowerShell):
+The easy mistake in RL-for-trading is to train and evaluate on the same price
+history. During a 2018–2023 mega-cap bull run almost any long-only policy
+"makes money" in-sample, so that number says nothing. This project is built
+around avoiding that:
+
+- **Chronological split** — train on `2018-01-01 … 2022-01-01`, hold out
+  `2022-01-01 … 2024-01-01`. The agent never sees test prices while training.
+- **Out-of-sample metrics** — total return, annualized Sharpe, volatility, and
+  max drawdown are reported on the held-out window only.
+- **Real baselines** — the agent is compared to **equal-weight (daily rebalanced)**
+  and **buy-and-hold** on the same prices and cost model. Beating buy-and-hold
+  out-of-sample on a risk-adjusted basis is the bar.
+- **No lookahead in regimes** — the volatility baseline that defines the
+  low/high/crash regimes is fixed on the training set and reused on the test set.
+
+## What's in the environment
+
+- Custom `PortfolioEnv` (classic gym ≤ 0.25 API, works with Stable-Baselines3 2.1):
+  softmax-normalized long-only weights, log-return reward net of turnover cost,
+  and a ruin cutoff at 50% of initial capital.
+- Observation = flattened window of recent returns + previous weights +
+  regime one-hot (low / high / crash from rolling volatility).
+- Price data is **injected**, not downloaded inside the env — so the same class
+  serves the train and test windows and can be unit-tested offline.
+
+## Layout
+
 ```
-python -m venv .venv
-.venv\Scripts\activate
+src/portfolio_rl/
+  env.py        # PortfolioEnv (gym)
+  data.py       # yfinance download + chronological train_test_split
+  regimes.py    # volatility regime labelling (baseline reusable across splits)
+  metrics.py    # total return, Sharpe, max drawdown, volatility (pure numpy)
+  baselines.py  # equal-weight and buy-and-hold backtests
+train.py        # train PPO on the training window, save the model
+evaluate.py     # out-of-sample run + benchmark comparison table
+tests/          # 11 offline unit tests (no network, no training)
+RL.ipynb        # narrated walkthrough of the whole flow
 ```
-2) Install dependencies:
-```
+
+## Run it
+
+```bash
 pip install -r requirements.txt
+
+# offline unit tests (metrics / regimes / baselines / env contract)
+pytest -q
+
+# full pipeline (needs network for prices + a few minutes to train)
+python train.py --timesteps 100000
+python evaluate.py
 ```
-3) (Optional) Install a CPU-only PyTorch build if the pinned version fails on your platform: see https://pytorch.org for the correct command.
 
-## Usage
-- Open and run [RL.ipynb](RL.ipynb) top to bottom. The first cell pins `stable-baselines3==2.1.0`, `gym==0.25.2`, and `shimmy==1.1.0` to match the custom environment.
-- Training uses default tickers `(AAPL, MSFT, GOOGL)` from 2018-01-01 to 2023-01-01. Edit the `tickers`, `start`, and `end` parameters in `PortfolioEnv` or `make_env()` to customize.
-- Outputs include portfolio value trajectories, regime frequency plots, and Sharpe ratios (overall and by regime).
+`evaluate.py` prints a comparison table:
 
-## Notes
-- The environment follows the classic gym API (`reset() -> obs`, `step() -> obs, reward, done, info`) to align with Stable-Baselines3 2.1.0.
-- Actions are softmax-normalized to weights; rewards use log-returns after transaction costs; a ruin condition triggers `done` if capital falls below 50% of the initial value.
-- Market regimes are inferred from rolling volatility of average returns (vol window configurable via `vol_window`).
+```
+Strategy                 TotRet   Sharpe     Vol    MaxDD       Final $
+------------------------------------------------------------------------
+PPO (regime-aware)         ...%     ....    ...%    ...%       ...
+Equal-weight (daily)       ...%     ....    ...%    ...%       ...
+Buy-and-hold               ...%     ....    ...%    ...%       ...
+```
 
-## Next Steps
-- Add transaction-cost schedules (e.g., nonlinear or asset-specific fees) and shorting constraints.
-- Hyperparameter sweeps for PPO (learning rate, batch size, `n_steps`) and longer training horizons.
-- Expand evaluation to include max drawdown, Calmar ratio, and constraint-aware backtests.
-- Package the environment as a Python module with unit tests and a scriptable training entrypoint.
+Paste your real `evaluate.py` numbers here — the head-to-head against
+buy-and-hold is the whole point of the project.
+
+## Limitations (stated honestly)
+
+- 3-ticker mega-cap universe: highly correlated and survivorship-biased.
+- A single test period is one regime path; walk-forward validation is the next step.
+- The reward is log-return net of cost, with no explicit risk penalty yet.
+
+Research exercise in RL environment design and evaluation — not financial advice.
+
+## License
+
+[MIT](LICENSE).
